@@ -99,12 +99,17 @@ router
   })
   .post('/todos/', async (ctx) => {
     const { title, completed = false, order } = ctx.request.body;
-
+  
     // Validate 'order' if provided
     if (order !== undefined && typeof order !== 'number') {
       ctx.throw(400, { error: '"order" must be a number' });
     }
-
+  
+    // Validate 'title' exists and is a string
+    if (!title || typeof title !== 'string' || !title.length) {
+      ctx.throw(400, { error: '"title" must be a non-empty string' });
+    }
+  
     // Extract tags from title (if any)
     const tagRegex = /#(\w+)/g;
     const tags = [];
@@ -114,10 +119,17 @@ router
         tags.push(match[1]);
       }
     }
-
+  
+    // Remove hashtags from the title and trim it
     const cleanedTitle = title.replace(tagRegex, '').trim();
+  
+    // Validate that the cleaned title is not empty
+    if (!cleanedTitle.length) {
+      ctx.throw(400, { error: 'Title must contain non-hashtag characters' });
+    }
+  
     const completedValue = completed ? 1 : 0; // Convert boolean to SQLite value
-
+  
     // Insert the todo into the database
     const todoId = await new Promise((resolve, reject) => {
       db.run(
@@ -129,14 +141,14 @@ router
         }
       );
     });
-
+  
     // Add tags to the database if not already present, and link them to the new todo
     await Promise.all(
       tags.map((tag) => {
         return new Promise((resolve, reject) => {
           db.get(`SELECT id FROM tags WHERE name = ?`, [tag], (err, row) => {
             if (err) return reject(err);
-
+  
             if (row) {
               // If the tag already exists, link it to the todo
               db.run(
@@ -165,13 +177,13 @@ router
         });
       })
     );
-
+  
     // Prepare tags for the response
     const tagsResponse = tags.map((tagName) => ({
       title: tagName,
       // Since we might not have the tag ID at this point, we can omit 'id' and 'url' or fetch them if necessary
     }));
-
+  
     ctx.status = 201;
     ctx.body = {
       id: String(todoId),
@@ -182,6 +194,7 @@ router
       tags: tagsResponse,
     };
   })
+  
   .get('/todos/:id', async (ctx) => {
     const id = ctx.params.id;
 
