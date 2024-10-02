@@ -474,7 +474,6 @@ router
 
     ctx.status = 204; // No Content
   });
-
 // Routes for Tags
 router
   .get('/tags/', async (ctx) => {
@@ -531,6 +530,29 @@ router
         resolve(row);
       });
     });
+
+    // Fetch todos associated with this tag
+    const todos = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT todos.id, todos.title, todos.completed, todos.order FROM todos
+         INNER JOIN todo_tags ON todos.id = todo_tags.todo_id
+         WHERE todo_tags.tag_id = ?`,
+        [id],
+        (err, rows) => {
+          if (err) return reject(err);
+          const todosWithDetails = rows.map((todo) => ({
+            id: String(todo.id),
+            title: todo.title,
+            completed: todo.completed === 1,
+            order: todo.order !== null ? todo.order : null,
+            url: `${ctx.origin}/todos/${todo.id}`,
+          }));
+          resolve(todosWithDetails);
+        }
+      );
+    });
+
+    tag.todos = todos;
 
     ctx.body = tag;
   })
@@ -589,7 +611,48 @@ router
       });
     });
     ctx.status = 204;
+  })
+  // Get todos associated with a tag
+  .get('/tags/:id/todos/', async (ctx) => {
+    const tagId = ctx.params.id;
+
+    // Validate that the tag exists
+    const tagExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM tags WHERE id = ?`, [tagId], (err, row) => {
+        if (err) return reject(err);
+        if (!row) {
+          ctx.throw(404, { error: 'Tag not found' });
+          return reject();
+        } else {
+          resolve(true);
+        }
+      });
+    });
+
+    // Fetch todos associated with this tag
+    const todos = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT todos.id, todos.title, todos.completed, todos.order FROM todos
+         INNER JOIN todo_tags ON todos.id = todo_tags.todo_id
+         WHERE todo_tags.tag_id = ?`,
+        [tagId],
+        (err, rows) => {
+          if (err) return reject(err);
+          const todosWithDetails = rows.map((todo) => ({
+            id: String(todo.id),
+            title: todo.title,
+            completed: todo.completed === 1,
+            order: todo.order !== null ? todo.order : null,
+            url: `${ctx.origin}/todos/${todo.id}`,
+          }));
+          resolve(todosWithDetails);
+        }
+      );
+    });
+
+    ctx.body = todos;
   });
+
 
 // Use middleware
 app
