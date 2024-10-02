@@ -234,10 +234,10 @@ router
     await new Promise((resolve, reject) => {
       db.run(
         `UPDATE todos SET 
-          title = COALESCE(?, title), 
-          completed = COALESCE(?, completed), 
-          "order" = COALESCE(?, "order") 
-        WHERE id = ?`,
+            title = COALESCE(?, title), 
+            completed = COALESCE(?, completed), 
+            "order" = COALESCE(?, "order") 
+          WHERE id = ?`,
         [title, completedValue, order, id],
         function (err) {
           if (err) return reject(err);
@@ -377,8 +377,8 @@ router
     const tags = await new Promise((resolve, reject) => {
       db.all(
         `SELECT tags.id, tags.name FROM tags
-         INNER JOIN todo_tags ON tags.id = todo_tags.tag_id
-         WHERE todo_tags.todo_id = ?`,
+           INNER JOIN todo_tags ON tags.id = todo_tags.tag_id
+           WHERE todo_tags.todo_id = ?`,
         [todoId],
         (err, rows) => {
           if (err) return reject(err);
@@ -474,6 +474,7 @@ router
 
     ctx.status = 204; // No Content
   });
+
 // Routes for Tags
 router
   .get('/tags/', async (ctx) => {
@@ -534,7 +535,7 @@ router
     // Fetch todos associated with this tag
     const todos = await new Promise((resolve, reject) => {
       db.all(
-        `SELECT todos.id, todos.title, todos.completed, todos.order FROM todos
+        `SELECT todos.id, todos.title, todos.completed, todos."order" FROM todos
          INNER JOIN todo_tags ON todos.id = todo_tags.todo_id
          WHERE todo_tags.tag_id = ?`,
         [id],
@@ -632,7 +633,7 @@ router
     // Fetch todos associated with this tag
     const todos = await new Promise((resolve, reject) => {
       db.all(
-        `SELECT todos.id, todos.title, todos.completed, todos.order FROM todos
+        `SELECT todos.id, todos.title, todos.completed, todos."order" FROM todos
          INNER JOIN todo_tags ON todos.id = todo_tags.todo_id
          WHERE todo_tags.tag_id = ?`,
         [tagId],
@@ -652,7 +653,6 @@ router
 
     ctx.body = todos;
   });
-
 
 // Use middleware
 app
