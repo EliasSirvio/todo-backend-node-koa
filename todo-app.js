@@ -204,12 +204,12 @@ router
         [id],
         (err, rows) => {
           if (err) return reject(err);
-          const tagsWithTitles = rows.map((tag) => ({
+          const tagsWithDetails = rows.map((tag) => ({
             id: String(tag.id),
             title: tag.name,
             url: `${ctx.origin}/tags/${tag.id}`,
           }));
-          resolve(tagsWithTitles);
+          resolve(tagsWithDetails);
         }
       );
     });
@@ -273,7 +273,7 @@ router
       // Include tags if necessary
     };
   })
-  .delete('/todos/:id', async (ctx) => {
+  .del('/todos/:id', async (ctx) => {
     const id = ctx.params.id;
 
     await new Promise((resolve, reject) => {
@@ -301,6 +301,178 @@ router
       });
     });
     ctx.status = 204;
+  })
+  // Associate a tag with a todo
+  .post('/todos/:id/tags/', async (ctx) => {
+    const todoId = ctx.params.id;
+    const { id: tagId } = ctx.request.body;
+
+    // Validate that the tag ID is provided
+    if (!tagId) {
+      ctx.throw(400, { error: 'Tag ID is required' });
+      return;
+    }
+
+    // Validate that the todo exists
+    const todoExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
+        if (err) return reject(err);
+        resolve(!!row);
+      });
+    });
+
+    if (!todoExists) {
+      ctx.throw(404, { error: 'Todo not found' });
+      return;
+    }
+
+    // Validate that the tag exists
+    const tagExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM tags WHERE id = ?`, [tagId], (err, row) => {
+        if (err) return reject(err);
+        resolve(!!row);
+      });
+    });
+
+    if (!tagExists) {
+      ctx.throw(404, { error: 'Tag not found' });
+      return;
+    }
+
+    // Associate the tag with the todo
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT OR IGNORE INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
+        [todoId, tagId],
+        (err) => {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
+
+    ctx.status = 201;
+    ctx.body = {
+      message: 'Tag associated with todo successfully',
+    };
+  })
+  // Get tags associated with a todo
+  .get('/todos/:id/tags/', async (ctx) => {
+    const todoId = ctx.params.id;
+
+    // Validate that the todo exists
+    const todoExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
+        if (err) return reject(err);
+        if (!row) {
+          ctx.throw(404, { error: 'Todo not found' });
+          return reject();
+        } else {
+          resolve(true);
+        }
+      });
+    });
+
+    // Fetch the tags associated with the todo
+    const tags = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT tags.id, tags.name FROM tags
+         INNER JOIN todo_tags ON tags.id = todo_tags.tag_id
+         WHERE todo_tags.todo_id = ?`,
+        [todoId],
+        (err, rows) => {
+          if (err) return reject(err);
+          const tagsWithDetails = rows.map((tag) => ({
+            id: String(tag.id),
+            title: tag.name,
+            url: `${ctx.origin}/tags/${tag.id}`,
+          }));
+          resolve(tagsWithDetails);
+        }
+      );
+    });
+
+    ctx.body = tags;
+  })
+  // Remove a specific tag association from a todo
+  .del('/todos/:id/tags/:tagId', async (ctx) => {
+    const todoId = ctx.params.id;
+    const tagId = ctx.params.tagId;
+
+    // Validate that the todo and tag exist
+    const todoExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
+        if (err) return reject(err);
+        resolve(!!row);
+      });
+    });
+
+    if (!todoExists) {
+      ctx.throw(404, { error: 'Todo not found' });
+      return;
+    }
+
+    const tagExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM tags WHERE id = ?`, [tagId], (err, row) => {
+        if (err) return reject(err);
+        resolve(!!row);
+      });
+    });
+
+    if (!tagExists) {
+      ctx.throw(404, { error: 'Tag not found' });
+      return;
+    }
+
+    // Remove the association
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?`,
+        [todoId, tagId],
+        function (err) {
+          if (err) return reject(err);
+          if (this.changes === 0) {
+            ctx.throw(404, { error: 'Tag association not found' });
+            return reject();
+          } else {
+            resolve();
+          }
+        }
+      );
+    });
+
+    ctx.status = 204; // No Content
+  })
+  // Remove all tag associations from a todo
+  .del('/todos/:id/tags/', async (ctx) => {
+    const todoId = ctx.params.id;
+
+    // Validate that the todo exists
+    const todoExists = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
+        if (err) return reject(err);
+        if (!row) {
+          ctx.throw(404, { error: 'Todo not found' });
+          return reject();
+        } else {
+          resolve(true);
+        }
+      });
+    });
+
+    // Remove all tag associations
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM todo_tags WHERE todo_id = ?`,
+        [todoId],
+        function (err) {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
+
+    ctx.status = 204; // No Content
   });
 
 // Routes for Tags
@@ -319,26 +491,6 @@ router
     });
 
     ctx.body = tags;
-  })
-  .get('/tags/:id', async (ctx) => {
-    const id = ctx.params.id;
-
-    const tag = await new Promise((resolve, reject) => {
-      db.get(`SELECT * FROM tags WHERE id = ?`, [id], (err, row) => {
-        if (err) return reject(err);
-        if (!row) {
-          ctx.throw(404, { error: 'Tag not found' });
-          return reject(new Error('Tag not found'));
-        }
-        row.id = String(row.id);
-        row.title = row.name;
-        row.url = `${ctx.origin}/tags/${row.id}`;
-        delete row.name;
-        resolve(row);
-      });
-    });
-
-    ctx.body = tag;
   })
   .post('/tags/', async (ctx) => {
     const { title } = ctx.request.body;
@@ -361,6 +513,26 @@ router
       title,
       url: `${ctx.origin}/tags/${tagId}`,
     };
+  })
+  .get('/tags/:id', async (ctx) => {
+    const id = ctx.params.id;
+
+    const tag = await new Promise((resolve, reject) => {
+      db.get(`SELECT * FROM tags WHERE id = ?`, [id], (err, row) => {
+        if (err) return reject(err);
+        if (!row) {
+          ctx.throw(404, { error: 'Tag not found' });
+          return reject(new Error('Tag not found'));
+        }
+        row.id = String(row.id);
+        row.title = row.name;
+        row.url = `${ctx.origin}/tags/${row.id}`;
+        delete row.name;
+        resolve(row);
+      });
+    });
+
+    ctx.body = tag;
   })
   .patch('/tags/:id', async (ctx) => {
     const id = ctx.params.id;
@@ -389,7 +561,7 @@ router
       url: `${ctx.origin}/tags/${id}`,
     };
   })
-  .delete('/tags/:id', async (ctx) => {
+  .del('/tags/:id', async (ctx) => {
     const id = ctx.params.id;
 
     await new Promise((resolve, reject) => {
