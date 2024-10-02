@@ -1,18 +1,25 @@
-const router = require('koa-router')();
-
-const sqlite3 = require('sqlite3').verbose;
-const db = new sqlite3.Database('mydb.sqlite');
-
 const Koa = require('koa');
+const Router = require('koa-router');
+const sqlite3 = require('sqlite3').verbose();
 const bodyParser = require('koa-bodyparser');
 const cors = require('@koa/cors');
 
 const app = new Koa();
+const router = new Router();
 
-// Database
+// Open the database (or create it if it doesn't exist)
+const db = new sqlite3.Database('mydb.sqlite', (err) => {
+  if (err) {
+    console.error('Error opening database:', err.message);
+  } else {
+    console.log('Connected to the SQLite database.');
+  }
+});
+
+// Database setup
 db.serialize(() => {
   db.run(`
-    CREATE TABLE todos (
+    CREATE TABLE IF NOT EXISTS todos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       completed BOOLEAN NOT NULL DEFAULT 0,
@@ -21,14 +28,14 @@ db.serialize(() => {
   `);
 
   db.run(`
-    CREATE TABLE tags (
+    CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE
     )
   `);
 
   db.run(`
-    CREATE TABLE todo_tags (
+    CREATE TABLE IF NOT EXISTS todo_tags (
       todo_id INTEGER,
       tag_id INTEGER,
       FOREIGN KEY (todo_id) REFERENCES todos (id),
@@ -38,72 +45,72 @@ db.serialize(() => {
   `);
 });
 
+// Route Handlers
 
-//TODOS
-let todos = {
-  0: {'title': 'build an API', 'order': 1, 'completed': false},
-  1: {'title': '?????', 'order': 2, 'completed': false},
-  2: {'title': 'profit!', 'order': 3, 'completed': false}
-};
-let nextId = 3;
-
-router.get('/todos/', list)
-  .del('/todos/', clear)
-  .post('/todos/', add)
-  .get('todo', '/todos/:id', show)
-  .patch('/todos/:id', update)
-  .del('/todos/:id', remove);
-
-  async function list(ctx) {
+// List all todos
+async function list(ctx) {
+  return new Promise((resolve, reject) => {
     db.all(`SELECT * FROM todos`, (err, todos) => {
       if (err) {
-        ctx.throw(500, { 'error': 'Failed to list todos' });
+        ctx.throw(500, { error: 'Failed to list todos' });
+        reject(err);
       }
-  
-      // Get tags for each todo
-      const todoPromises = todos.map(todo => {
-        return new Promise((resolve, reject) => {
+
+      const todoPromises = todos.map((todo) => {
+        return new Promise((resolveTodo, rejectTodo) => {
           db.all(
             `SELECT name FROM tags INNER JOIN todo_tags ON tags.id = todo_tags.tag_id WHERE todo_tags.todo_id = ?`,
             [todo.id],
             (err, tags) => {
               if (err) {
-                reject(err);
+                rejectTodo(err);
               } else {
-                todo.tags = tags.map(tag => tag.name);
-                resolve(todo);
+                todo.tags = tags.map((tag) => tag.name);
+                resolveTodo(todo);
               }
             }
           );
         });
       });
-  
+
       Promise.all(todoPromises)
-        .then(results => {
+        .then((results) => {
           ctx.body = results;
+          resolve();
         })
-        .catch(err => {
-          ctx.throw(500, { 'error': 'Failed to retrieve tags' });
+        .catch((err) => {
+          ctx.throw(500, { error: 'Failed to retrieve tags' });
+          reject(err);
         });
     });
-  }
-  
-
-async function clear(ctx) {
-  todos = {};
-  ctx.status = 204;
+  });
 }
 
-// Function to add a new todo with tags parsed from the title
+// Clear all todos
+async function clear(ctx) {
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM todos`, (err) => {
+      if (err) {
+        ctx.throw(500, { error: 'Failed to clear todos' });
+        reject(err);
+      } else {
+        ctx.status = 204;
+        resolve();
+      }
+    });
+  });
+}
+
+// Add a new todo
 async function add(ctx) {
   const { title, completed = false } = ctx.request.body;
 
   // Validate title
   if (!title || typeof title !== 'string' || !title.length) {
-    ctx.throw(400, { 'error': '"title" must be a string with at least one character' });
+    ctx.throw(400, { error: '"title" must be a string with at least one character' });
   }
 
-  // Extract tags from the title using a regular expression
+  // Extract tags from the title
   const tagRegex = /#(\w+)/g;
   const tags = [];
   let match;
@@ -111,122 +118,81 @@ async function add(ctx) {
     tags.push(match[1]);
   }
 
-  // Remove tags from the title to store the plain title
   const cleanedTitle = title.replace(tagRegex, '').trim();
 
-  db.serialize(() => {
-    // Insert the cleaned todo title into the todos table
+  return new Promise((resolve, reject) => {
     db.run(
       `INSERT INTO todos (title, completed, "order") VALUES (?, ?, ?)`,
-      [cleanedTitle, completed, nextId],
+      [cleanedTitle, completed, Date.now()],
       function (err) {
         if (err) {
-          ctx.throw(500, { 'error': 'Failed to add todo' });
+          ctx.throw(500, { error: 'Failed to add todo' });
+          reject(err);
         }
 
         const todoId = this.lastID;
 
-        // Insert tags into the tags table and link them to the todo
-        tags.forEach(tag => {
-          db.get(`SELECT id FROM tags WHERE name = ?`, [tag], (err, row) => {
-            if (err) {
-              ctx.throw(500, { 'error': 'Failed to add tag' });
-            }
-
-            if (row) {
-              // Tag already exists, use its id
-              db.run(`INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`, [todoId, row.id]);
-            } else {
-              // Insert new tag and link it to the todo
-              db.run(`INSERT INTO tags (name) VALUES (?)`, [tag], function () {
-                const tagId = this.lastID;
-                db.run(`INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`, [todoId, tagId]);
-              });
-            }
+        // Handle tag creation and linking
+        const tagPromises = tags.map((tag) => {
+          return new Promise((resolveTag, rejectTag) => {
+            db.get(`SELECT id FROM tags WHERE name = ?`, [tag], (err, row) => {
+              if (err) {
+                rejectTag(err);
+              } else if (row) {
+                db.run(
+                  `INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
+                  [todoId, row.id],
+                  (err) => {
+                    if (err) rejectTag(err);
+                    else resolveTag();
+                  }
+                );
+              } else {
+                db.run(`INSERT INTO tags (name) VALUES (?)`, [tag], function () {
+                  db.run(
+                    `INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
+                    [todoId, this.lastID],
+                    (err) => {
+                      if (err) rejectTag(err);
+                      else resolveTag();
+                    }
+                  );
+                });
+              }
+            });
           });
         });
 
-        ctx.status = 201;
-        ctx.body = { id: todoId, title: cleanedTitle, completed, tags };
+        Promise.all(tagPromises)
+          .then(() => {
+            ctx.status = 201;
+            ctx.body = { id: todoId, title: cleanedTitle, completed, tags };
+            resolve();
+          })
+          .catch((err) => {
+            ctx.throw(500, { error: 'Failed to add tags' });
+            reject(err);
+          });
       }
     );
   });
 }
 
-async function show(ctx) {
-  const id = ctx.params.id;
-  const todo = todos[id]
-  if (!todo) ctx.throw(404, {'error': 'Todo not found'});
-  todo.id = id;
-  ctx.body = todo;
-}
+// Setup the routes
+router.get('/todos/', list)
+  .del('/todos/', clear)
+  .post('/todos/', add)
+  .get('/todos/:id', show)
+  .patch('/todos/:id', update)
+  .del('/todos/:id', remove);
 
-async function update(ctx) {
-  const id = ctx.params.id;
-  const { title, completed, tags } = ctx.request.body;
-
-  db.serialize(() => {
-    // Update todo fields
-    if (title || completed !== undefined) {
-      db.run(
-        `UPDATE todos SET title = COALESCE(?, title), completed = COALESCE(?, completed) WHERE id = ?`,
-        [title, completed, id],
-        (err) => {
-          if (err) {
-            ctx.throw(500, { 'error': 'Failed to update todo' });
-          }
-        }
-      );
-    }
-
-    // Update tags if provided
-    if (tags) {
-      db.run(`DELETE FROM todo_tags WHERE todo_id = ?`, [id], (err) => {
-        if (err) {
-          ctx.throw(500, { 'error': 'Failed to clear old tags' });
-        }
-
-        tags.forEach(tag => {
-          db.get(`SELECT id FROM tags WHERE name = ?`, [tag], (err, row) => {
-            if (err) {
-              ctx.throw(500, { 'error': 'Failed to update tags' });
-            }
-
-            if (row) {
-              // Tag already exists, link it
-              db.run(`INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`, [id, row.id]);
-            } else {
-              // Insert new tag and link it
-              db.run(`INSERT INTO tags (name) VALUES (?)`, [tag], function () {
-                const tagId = this.lastID;
-                db.run(`INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`, [id, tagId]);
-              });
-            }
-          });
-        });
-      });
-    }
-
-    ctx.status = 200;
-    ctx.body = { id, title, completed, tags };
-  });
-}
-
-
-async function remove(ctx) {
-  const id = ctx.params.id;
-  if (!todos[id]) ctx.throw(404, {'error': 'Todo not found'});
-
-  delete todos[id];
-
-  ctx.status = 204;
-}
-
+// Use middleware
 app
   .use(bodyParser())
   .use(cors())
   .use(router.routes())
   .use(router.allowedMethods());
 
-app.listen(8080);
-
+app.listen(8080, () => {
+  console.log('Server running on http://localhost:8080');
+});
