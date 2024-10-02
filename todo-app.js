@@ -7,8 +7,11 @@ const cors = require('@koa/cors');
 const app = new Koa();
 const router = new Router();
 
+const path = require('path');
+const dbPath = path.join(__dirname, 'mydb.sqlite');
+
 // Open the database (or create it if it doesn't exist)
-const db = new sqlite3.Database('mydb.sqlite', (err) => {
+const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
   } else {
@@ -140,7 +143,7 @@ router
                 `INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
                 [todoId, row.id],
                 (err) => {
-                  if (err) reject(err);
+                  if (err) return reject(err);
                   else resolve();
                 }
               );
@@ -152,7 +155,7 @@ router
                   `INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
                   [todoId, this.lastID],
                   (err) => {
-                    if (err) reject(err);
+                    if (err) return reject(err);
                     else resolve();
                   }
                 );
@@ -186,8 +189,9 @@ router
       db.get(`SELECT * FROM todos WHERE id = ?`, [id], (err, row) => {
         if (err) return reject(err);
         if (!row) {
-          ctx.throw(404, { error: 'Todo not found' });
-          return reject(new Error('Todo not found'));
+          const error = new Error('Todo not found');
+          error.status = 404;
+          return reject(error);
         }
         row.completed = row.completed === 1; // Convert completed to boolean
         row.id = String(row.id); // Ensure id is a string
@@ -231,47 +235,62 @@ router
     const completedValue =
       completed !== undefined ? (completed ? 1 : 0) : undefined; // Convert boolean to SQLite value if present
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE todos SET 
-            title = COALESCE(?, title), 
-            completed = COALESCE(?, completed), 
-            "order" = COALESCE(?, "order") 
-          WHERE id = ?`,
-        [title, completedValue, order, id],
-        function (err) {
-          if (err) return reject(err);
-          if (this.changes === 0) {
-            ctx.throw(404, { error: 'Todo not found' });
-            return reject(new Error('Todo not found'));
+    try {
+      // Update the todo item
+      await new Promise((resolve, reject) => {
+        db.run(
+          `UPDATE todos SET 
+              title = COALESCE(?, title), 
+              completed = COALESCE(?, completed), 
+              "order" = COALESCE(?, "order") 
+            WHERE id = ?`,
+          [title, completedValue, order, id],
+          function (err) {
+            if (err) return reject(err);
+            if (this.changes === 0) {
+              const error = new Error('Todo not found');
+              error.status = 404;
+              return reject(error);
+            }
+            resolve();
           }
-          resolve();
-        }
-      );
-    });
-
-    // Retrieve the updated todo
-    const todo = await new Promise((resolve, reject) => {
-      db.get(`SELECT * FROM todos WHERE id = ?`, [id], (err, row) => {
-        if (err) return reject(err);
-        row.completed = row.completed === 1;
-        row.id = String(row.id);
-        row.order = row.order !== null ? row.order : null;
-        resolve(row);
+        );
       });
-    });
 
-    todo.url = `${ctx.origin}/todos/${todo.id}`;
+      // Retrieve the updated todo
+      const todo = await new Promise((resolve, reject) => {
+        db.get(`SELECT * FROM todos WHERE id = ?`, [id], (err, row) => {
+          if (err) return reject(err);
+          if (!row) {
+            const error = new Error('Todo not found');
+            error.status = 404;
+            return reject(error);
+          }
+          row.completed = row.completed === 1;
+          row.id = String(row.id);
+          row.order = row.order !== null ? row.order : null;
+          resolve(row);
+        });
+      });
 
-    ctx.status = 200;
-    ctx.body = {
-      id: todo.id,
-      title: todo.title,
-      completed: todo.completed,
-      order: todo.order,
-      url: todo.url,
-      // Include tags if necessary
-    };
+      todo.url = `${ctx.origin}/todos/${todo.id}`;
+
+      ctx.status = 200;
+      ctx.body = {
+        id: todo.id,
+        title: todo.title,
+        completed: todo.completed,
+        order: todo.order,
+        url: todo.url,
+        // Include tags if necessary
+      };
+    } catch (err) {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
+    }
   })
   .del('/todos/:id', async (ctx) => {
     const id = ctx.params.id;
@@ -280,11 +299,18 @@ router
       db.run(`DELETE FROM todos WHERE id = ?`, [id], function (err) {
         if (err) return reject(err);
         if (this.changes === 0) {
-          ctx.throw(404, { error: 'Todo not found' });
-          return reject(new Error('Todo not found'));
+          const error = new Error('Todo not found');
+          error.status = 404;
+          return reject(error);
         }
         resolve();
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     ctx.status = 204;
@@ -293,12 +319,13 @@ router
     await new Promise((resolve, reject) => {
       db.run(`DELETE FROM todos`, (err) => {
         if (err) {
-          ctx.throw(500, { error: 'Failed to clear todos' });
-          reject(err);
+          return reject(err);
         } else {
           resolve();
         }
       });
+    }).catch((err) => {
+      ctx.throw(500, { error: 'Failed to clear todos' });
     });
     ctx.status = 204;
   })
@@ -349,6 +376,8 @@ router
           resolve();
         }
       );
+    }).catch((err) => {
+      ctx.throw(500, { error: 'Failed to associate tag with todo' });
     });
 
     ctx.status = 201;
@@ -365,20 +394,27 @@ router
       db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
         if (err) return reject(err);
         if (!row) {
-          ctx.throw(404, { error: 'Todo not found' });
-          return reject();
+          const error = new Error('Todo not found');
+          error.status = 404;
+          return reject(error);
         } else {
           resolve(true);
         }
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     // Fetch the tags associated with the todo
     const tags = await new Promise((resolve, reject) => {
       db.all(
         `SELECT tags.id, tags.name FROM tags
-           INNER JOIN todo_tags ON tags.id = todo_tags.tag_id
-           WHERE todo_tags.todo_id = ?`,
+         INNER JOIN todo_tags ON tags.id = todo_tags.tag_id
+         WHERE todo_tags.todo_id = ?`,
         [todoId],
         (err, rows) => {
           if (err) return reject(err);
@@ -432,13 +468,20 @@ router
         function (err) {
           if (err) return reject(err);
           if (this.changes === 0) {
-            ctx.throw(404, { error: 'Tag association not found' });
-            return reject();
+            const error = new Error('Tag association not found');
+            error.status = 404;
+            return reject(error);
           } else {
             resolve();
           }
         }
       );
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     ctx.status = 204; // No Content
@@ -452,12 +495,19 @@ router
       db.get(`SELECT id FROM todos WHERE id = ?`, [todoId], (err, row) => {
         if (err) return reject(err);
         if (!row) {
-          ctx.throw(404, { error: 'Todo not found' });
-          return reject();
+          const error = new Error('Todo not found');
+          error.status = 404;
+          return reject(error);
         } else {
           resolve(true);
         }
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     // Remove all tag associations
@@ -470,6 +520,8 @@ router
           resolve();
         }
       );
+    }).catch((err) => {
+      ctx.throw(500, { error: 'Failed to remove tag associations' });
     });
 
     ctx.status = 204; // No Content
@@ -521,8 +573,9 @@ router
       db.get(`SELECT * FROM tags WHERE id = ?`, [id], (err, row) => {
         if (err) return reject(err);
         if (!row) {
-          ctx.throw(404, { error: 'Tag not found' });
-          return reject(new Error('Tag not found'));
+          const error = new Error('Tag not found');
+          error.status = 404;
+          return reject(error);
         }
         row.id = String(row.id);
         row.title = row.name;
@@ -570,11 +623,18 @@ router
       db.run(`UPDATE tags SET name = ? WHERE id = ?`, [title, id], function (err) {
         if (err) return reject(err);
         if (this.changes === 0) {
-          ctx.throw(404, { error: 'Tag not found' });
-          return reject(new Error('Tag not found'));
+          const error = new Error('Tag not found');
+          error.status = 404;
+          return reject(error);
         }
         resolve();
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     ctx.status = 200;
@@ -591,11 +651,18 @@ router
       db.run(`DELETE FROM tags WHERE id = ?`, [id], function (err) {
         if (err) return reject(err);
         if (this.changes === 0) {
-          ctx.throw(404, { error: 'Tag not found' });
-          return reject(new Error('Tag not found'));
+          const error = new Error('Tag not found');
+          error.status = 404;
+          return reject(error);
         }
         resolve();
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     ctx.status = 204;
@@ -604,12 +671,13 @@ router
     await new Promise((resolve, reject) => {
       db.run(`DELETE FROM tags`, (err) => {
         if (err) {
-          ctx.throw(500, { error: 'Failed to clear tags' });
-          reject(err);
+          return reject(err);
         } else {
           resolve();
         }
       });
+    }).catch((err) => {
+      ctx.throw(500, { error: 'Failed to clear tags' });
     });
     ctx.status = 204;
   })
@@ -622,12 +690,19 @@ router
       db.get(`SELECT id FROM tags WHERE id = ?`, [tagId], (err, row) => {
         if (err) return reject(err);
         if (!row) {
-          ctx.throw(404, { error: 'Tag not found' });
-          return reject();
+          const error = new Error('Tag not found');
+          error.status = 404;
+          return reject(error);
         } else {
           resolve(true);
         }
       });
+    }).catch((err) => {
+      if (err.status === 404) {
+        ctx.throw(404, { error: err.message });
+      } else {
+        ctx.throw(500, { error: 'Internal Server Error' });
+      }
     });
 
     // Fetch todos associated with this tag
